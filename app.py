@@ -32,41 +32,71 @@ def load_models():
         cuda_available = torch.cuda.is_available()
         if cuda_available:
             st.success("✅ CUDA is available! Using GPU for faster processing")
+            device = torch.device("cuda")
+        else:
+            device = torch.device("cpu")
+            st.info("🖥️ Using CPU for processing (GPU not detected)")
         
         # Load spaCy model
         try:
+            # Try to load existing model
             nlp = spacy.load("en_core_web_sm")
             st.success("✅ Successfully loaded spaCy model")
         except OSError as e:
             st.warning(f"Could not load spaCy model: {e}")
             st.info("Downloading spaCy model. This may take a moment...")
             
-            # Use spacy_streamlit to download model
-            spacy_streamlit.download_model("en_core_web_sm")
+            # Try downloading directly
             try:
+                import subprocess
+                subprocess.run([sys.executable, "-m", "spacy", "download", "en_core_web_sm"], 
+                           check=True, capture_output=True)
                 nlp = spacy.load("en_core_web_sm")
                 st.success("✅ Successfully downloaded and loaded spaCy model")
             except Exception as e:
-                st.error(f"Error loading spaCy model after download: {e}")
-                return None, None, None
+                st.error(f"Error downloading spaCy model: {e}")
+                try:
+                    # Use spacy_streamlit as fallback
+                    spacy_streamlit.download_model("en_core_web_sm")
+                    nlp = spacy.load("en_core_web_sm")
+                    st.success("✅ Successfully loaded spaCy model using alternative method")
+                except Exception as e:
+                    st.error(f"All methods of loading spaCy model failed: {e}")
+                    return None, None, None
         
         # Load sentence-transformers model
         try:
-            device = 'cuda' if cuda_available else 'cpu'
-            model = SentenceTransformer('all-MiniLM-L6-v2', device=device)
-            st.success(f"✅ Successfully loaded sentence transformer model on {device}")
+            model_name = 'all-MiniLM-L6-v2'  # Small but effective model
+            model = SentenceTransformer(model_name, device=str(device))
+            st.success(f"✅ Successfully loaded sentence transformer model ({model_name}) on {device}")
         except Exception as e:
             st.error(f"Error loading sentence transformer model: {e}")
-            return nlp, None, None
+            try:
+                # Try a different model as fallback
+                model_name = 'paraphrase-MiniLM-L3-v2'  # Even smaller model
+                model = SentenceTransformer(model_name, device=str(device))
+                st.success(f"✅ Successfully loaded alternative sentence transformer model ({model_name})")
+            except Exception as e:
+                st.error(f"All sentence transformer models failed to load: {e}")
+                return nlp, None, None
         
         # Load NER model
         try:
-            device = 0 if cuda_available else -1  # 0=cuda, -1=cpu
-            keyword_extractor = pipeline("ner", model="dbmdz/bert-large-cased-finetuned-conll03-english", device=device)
-            st.success(f"✅ Successfully loaded NER model on {'GPU' if device==0 else 'CPU'}")
+            # Use a smaller/faster model for Hugging Face Spaces
+            model_name = "dslim/bert-base-NER"  # Smaller than original model
+            device_id = 0 if cuda_available else -1  # 0=cuda, -1=cpu
+            keyword_extractor = pipeline("ner", model=model_name, device=device_id)
+            st.success(f"✅ Successfully loaded NER model ({model_name}) on {'GPU' if device_id==0 else 'CPU'}")
         except Exception as e:
             st.error(f"Error loading NER model: {e}")
-            return nlp, model, None
+            try:
+                # Try a different model as fallback
+                model_name = "elastic/distilbert-base-cased-finetuned-conll03-english"
+                keyword_extractor = pipeline("ner", model=model_name, device=device_id)
+                st.success(f"✅ Successfully loaded alternative NER model ({model_name})")
+            except Exception as e:
+                st.error(f"All NER models failed to load: {e}")
+                return nlp, model, None
         
         return nlp, model, keyword_extractor
 
@@ -383,125 +413,3 @@ def main():
                 else:
                     # Process GSC data to get top queries per page
                     gsc_data = gsc_data.sort_values(by=['URL', 'Clicks'], ascending=[True, False])
-                    top_queries_per_page = {}
-                    
-                    for url in gsc_data['URL'].unique():
-                        page_queries = gsc_data[gsc_data['URL'] == url].head(top_queries)
-                        if not page_queries.empty:
-                            top_queries_per_page[url] = page_queries['Query'].tolist()
-                    
-                    # Generate results
-                    results = []
-                    
-                    # For each page in the content data
-                    for _, content_row in content_data.iterrows():
-                        source_url = content_row['URL']
-                        source_content = str(content_row['Content'])
-                        
-                        # Skip if no content
-                        if pd.isna(source_content) or not source_content.strip():
-                            continue
-                        
-                        # Get top queries for this page
-                        if source_url in top_queries_per_page:
-                            queries = top_queries_per_page[source_url]
-                            
-                            # Extract keywords and generate variations
-                            keywords = extract_keywords(source_content, nlp, keyword_extractor, top_n=top_queries)
-                            all_keywords = list(set(queries + keywords))
-                            keyword_variations = generate_semantic_variations(all_keywords, semantic_model, nlp)
-                            
-                            # For each destination page
-                            for _, dest_row in content_data.iterrows():
-                                dest_url = dest_row['URL']
-                                dest_content = str(dest_row['Content'])
-                                
-                                # Skip self-links or empty content
-                                if dest_url == source_url or pd.isna(dest_content) or not dest_content.strip():
-                                    continue
-                                
-                                # Calculate base similarity between pages
-                                base_similarity = calculate_similarity_score(
-                                    preprocess_text(source_content)[:1000], 
-                                    preprocess_text(dest_content)[:1000],
-                                    semantic_model
-                                )
-                                
-                                # Only consider pages with some similarity
-                                if base_similarity >= 50:
-                                    # For each potential anchor text
-                                    for keyword in keyword_variations:
-                                        # Skip very short keywords
-                                        if len(keyword) < 3:
-                                            continue
-                                        
-                                        # Calculate keyword to destination similarity
-                                        keyword_dest_similarity = calculate_similarity_score(
-                                            keyword, 
-                                            preprocess_text(dest_content)[:1000],
-                                            semantic_model
-                                        )
-                                        
-                                        # Only consider if similarity is above threshold
-                                        if keyword_dest_similarity >= similarity_threshold:
-                                            # Extract context snippets
-                                            snippets = extract_content_snippets(source_content, keyword)
-                                            
-                                            # Check if anchor already exists
-                                            has_existing_anchor = check_existing_anchor(source_content, keyword, dest_url)
-                                            
-                                            # Generate suggestion if no anchor exists
-                                            content_suggestion = ""
-                                            if not has_existing_anchor and not snippets:
-                                                content_suggestion = suggest_new_content(source_content, keyword)
-                                            
-                                            # If we have snippets or a suggestion
-                                            if snippets or content_suggestion:
-                                                # Get the best context snippet
-                                                context = snippets[0] if snippets else "No direct match found in content."
-                                                
-                                                results.append({
-                                                    'Source URL': source_url,
-                                                    'Anchor Text': keyword,
-                                                    'Similarity Score': keyword_dest_similarity,
-                                                    'Destination URL': dest_url,
-                                                    'Content Context': context,
-                                                    'Existing Anchor?': 'Yes' if has_existing_anchor else 'No',
-                                                    'New Content Suggestion': content_suggestion if not has_existing_anchor and not snippets else ""
-                                                })
-                    
-                    # Convert to DataFrame and sort
-                    if results:
-                        df_results = pd.DataFrame(results)
-                        df_results = df_results.sort_values(by=['Similarity Score'], ascending=False)
-                        
-                        # Limit results per page
-                        page_counts = df_results['Source URL'].value_counts()
-                        filtered_results = []
-                        
-                        for _, row in df_results.iterrows():
-                            source_url = row['Source URL']
-                            if page_counts[source_url] <= max_suggestions:
-                                filtered_results.append(row)
-                            else:
-                                page_counts[source_url] -= 1
-                        
-                        final_results = pd.DataFrame(filtered_results)
-                        
-                        # Display results
-                        st.header("Internal Linking Opportunities")
-                        st.dataframe(final_results, use_container_width=True)
-                        
-                        # Download button
-                        csv = final_results.to_csv(index=False)
-                        st.download_button(
-                            label="Download Results as CSV",
-                            data=csv,
-                            file_name="internal_linking_opportunities.csv",
-                            mime="text/csv"
-                        )
-                    else:
-                        st.warning("No linking opportunities found with the current settings. Try adjusting the similarity threshold or increasing the number of top queries.")
-
-if __name__ == "__main__":
-    main()
