@@ -8,6 +8,8 @@ from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
 import re
 import spacy
+import sys
+import os
 from sentence_transformers import SentenceTransformer
 import torch
 from transformers import pipeline
@@ -25,17 +27,74 @@ def load_models():
     # Load spaCy for NER and sentence segmentation
     try:
         nlp = spacy.load("en_core_web_md")
-    except:
-        # If model not available, download it
+    except OSError:
+        st.info("Downloading spaCy model. This may take a moment...")
+        # Use subprocess to run the spaCy download command
         import subprocess
-        subprocess.run(["python", "-m", "spacy", "download", "en_core_web_md"])
-        nlp = spacy.load("en_core_web_md")
+        result = subprocess.run([sys.executable, "-m", "spacy", "download", "en_core_web_md"], 
+                              capture_output=True, text=True)
+        if result.returncode != 0:
+            st.error(f"Failed to download spaCy model: {result.stderr}")
+            st.info("Trying alternative download method...")
+            
+            # Try using a smaller model as fallback
+            try:
+                result = subprocess.run([sys.executable, "-m", "spacy", "download", "en_core_web_sm"], 
+                                     capture_output=True, text=True)
+                if result.returncode != 0:
+                    st.error(f"Failed to download alternative model: {result.stderr}")
+                    st.error("Please install the spaCy model manually: python -m spacy download en_core_web_md")
+                    # Use a very simple fallback
+                    nlp = spacy.blank("en")
+                else:
+                    nlp = spacy.load("en_core_web_sm")
+                    st.warning("Using a smaller language model. Results may be less accurate.")
+            except:
+                nlp = spacy.blank("en")
+                st.warning("Using a basic language model. Results may be less accurate.")
+        else:
+            nlp = spacy.load("en_core_web_md")
     
     # Load sentence-transformers model for semantic similarity
-    model = SentenceTransformer('all-MiniLM-L6-v2')
+    try:
+        model = SentenceTransformer('all-MiniLM-L6-v2')
+    except Exception as e:
+        st.error(f"Error loading sentence transformer model: {e}")
+        # Create a simple fallback
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        class SimpleSentenceTransformer:
+            def __init__(self):
+                self.vectorizer = TfidfVectorizer()
+                self.fitted = False
+                
+            def encode(self, texts, convert_to_tensor=False):
+                if isinstance(texts, str):
+                    texts = [texts]
+                if not self.fitted:
+                    self.vectorizer.fit(texts)
+                    self.fitted = True
+                vectors = self.vectorizer.transform(texts).toarray()
+                if convert_to_tensor:
+                    import numpy as np
+                    return torch.tensor(vectors)
+                return vectors
+        
+        model = SimpleSentenceTransformer()
+        st.warning("Using a simplified text transformer. Results may be less accurate.")
     
     # Load keyword extraction model
-    keyword_extractor = pipeline("ner", model="dbmdz/bert-large-cased-finetuned-conll03-english")
+    try:
+        keyword_extractor = pipeline("ner", model="dbmdz/bert-large-cased-finetuned-conll03-english")
+    except Exception as e:
+        st.error(f"Error loading NER model: {e}")
+        # Create a simple fallback
+        class SimpleKeywordExtractor:
+            def __call__(self, text):
+                words = text.split()
+                return [{"word": word, "entity": "MISC"} for word in words if len(word) > 3]
+        
+        keyword_extractor = SimpleKeywordExtractor()
+        st.warning("Using a simplified keyword extractor. Results may be less accurate.")
     
     return nlp, model, keyword_extractor
 
