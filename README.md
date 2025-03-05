@@ -110,9 +110,33 @@ For deploying to Streamlit Cloud, the full version should work properly with the
    - The app processes text in chunks when needed to avoid memory issues with large texts
    - Long operations show progress indicators to keep users informed
 
-## Deployment
+## Deployment Options
 
-The application can be deployed on Streamlit Cloud or any other platform that supports Streamlit applications.
+### Hugging Face Spaces (Recommended)
+Hugging Face Spaces provides excellent support for NLP applications and is the recommended deployment platform.
+
+1. Create a Hugging Face account at [huggingface.co](https://huggingface.co)
+2. Create a new Space:
+   - Select "Streamlit" as the SDK
+   - Link your GitHub repository or upload the files directly
+   - Spaces will automatically detect the `requirements.txt` and install dependencies
+3. The app should deploy automatically. If there are any issues, check the Spaces logs.
+
+#### Files for Hugging Face Spaces
+The repository includes several special files for Hugging Face Spaces deployment:
+
+- `Procfile`: Defines the command to start the app
+- `packages.txt`: Lists system-level dependencies
+- `runtime.txt`: Specifies the Python version
+- `README-huggingface.md`: Special README displayed on your Space page
+
+### Alternative Deployment Options
+Other platforms that work well with this application:
+
+- **Render**: Good free tier with support for Python applications
+- **DigitalOcean App Platform**: Reliable with good resource allocation
+- **Railway**: Developer-friendly with simple deployment process
+- **Heroku**: Well-established but requires a paid plan
 
 ## Troubleshooting
 
