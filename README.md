@@ -49,6 +49,7 @@ The application generates a report with the following columns:
 
 ## Installation
 
+### Option 1: Full Installation (with all NLP features)
 ```bash
 # Clone the repository
 git clone <repository-url>
@@ -60,6 +61,21 @@ pip install -r requirements.txt
 # Run the application
 streamlit run app.py
 ```
+
+### Option 2: Simplified Installation (fewer dependencies)
+```bash
+# Clone the repository
+git clone <repository-url>
+cd internal-link-finder
+
+# Install simplified dependencies
+pip install -r simple_requirements.txt
+
+# Run the simplified version
+streamlit run streamlit_app.py
+```
+
+If you encounter any issues with the full installation, the simplified version is recommended as it uses fewer dependencies while maintaining core functionality.
 
 ## Deployment
 
