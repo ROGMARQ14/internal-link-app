@@ -75,11 +75,60 @@ pip install -r simple_requirements.txt
 streamlit run streamlit_app.py
 ```
 
-If you encounter any issues with the full installation, the simplified version is recommended as it uses fewer dependencies while maintaining core functionality.
+### Option 3: Minimal Installation (best for Python 3.12+ compatibility)
+```bash
+# Clone the repository
+git clone <repository-url>
+cd internal-link-finder
+
+# Install minimal dependencies
+pip install -r minimal_requirements.txt
+
+# Run the minimal version
+streamlit run minimal_app.py
+```
+
+If you encounter any issues with the full installation, try the simplified or minimal version which use fewer dependencies while maintaining core functionality. The minimal version is specifically designed to work with Python 3.12+ environments.
+
+## Installation for Streamlit Deployment
+
+For deploying to Streamlit Cloud, the full version should work properly with the following considerations:
+
+1. **Handling spaCy on Streamlit Cloud**
+   - The application now uses `spacy_streamlit` to manage proper installation of spaCy and its models
+   - spaCy models are loaded directly from GitHub releases to ensure compatibility
+
+2. **GPU Acceleration**
+   - If CUDA is available, the application will automatically use GPU acceleration
+   - If not, it will fall back to CPU processing with minimal performance loss
+
+3. **Error Handling**
+   - Robust error handling ensures the application works even if some models fail to load
+   - Clear status messages show which models are available and functioning
+
+4. **Memory Management**
+   - The app processes text in chunks when needed to avoid memory issues with large texts
+   - Long operations show progress indicators to keep users informed
 
 ## Deployment
 
 The application can be deployed on Streamlit Cloud or any other platform that supports Streamlit applications.
+
+## Troubleshooting
+
+If you encounter issues with the application:
+
+1. **spaCy Model Loading**
+   - If you encounter errors with spaCy models, the application will attempt to download them automatically
+   - You can manually install spaCy models with: `python -m spacy download en_core_web_sm`
+
+2. **Memory Issues**
+   - For processing very large files, increase the memory allocation in Streamlit settings
+   - Break up very large content files into smaller chunks for better performance
+
+3. **Package Compatibility**
+   - If you encounter package compatibility issues, you can specify exact versions in requirements.txt
+   - The current requirements are tested to work with Python 3.12+
 
 ## Requirements
 
