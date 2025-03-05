@@ -1,0 +1,16 @@
+URL,Query,Clicks,Impressions
+https://example.com/product/smartphones,smartphones,120,1500
+https://example.com/product/smartphones,iphone,85,950
+https://example.com/product/smartphones,android phones,65,800
+https://example.com/product/smartphones,budget smartphones,45,600
+https://example.com/product/smartphones,best smartphones 2025,35,400
+https://example.com/product/laptops,laptops,110,1400
+https://example.com/product/laptops,gaming laptops,90,1000
+https://example.com/product/laptops,business laptops,70,850
+https://example.com/product/laptops,macbook,50,700
+https://example.com/product/laptops,budget laptops,40,500
+https://example.com/blog/smartphone-buying-guide,smartphone buying guide,80,950
+https://example.com/blog/smartphone-buying-guide,how to choose a smartphone,55,750
+https://example.com/blog/smartphone-buying-guide,best smartphone features,40,550
+https://example.com/blog/laptop-vs-desktop,laptop vs desktop,75,900
+https://example.com/blog/laptop-vs-desktop,should i buy a laptop or desktop,50,650
