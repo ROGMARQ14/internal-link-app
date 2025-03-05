@@ -1,108 +1,70 @@
-# Internal Linking Opportunity Analyzer
+# Context-Aware Automatic Keyword Interlinker
 
-This tool analyzes a website's content and Google Search Console data to identify internal linking opportunities based on keyword relevance.
-
-## Overview
-
-The Internal Linking Opportunity Analyzer helps website owners and SEO specialists improve their internal linking strategy by:
-
-1. Analyzing website content from URLs in an XML sitemap
-2. Processing Google Search Console (GSC) performance reports
-3. Identifying keywords that appear in content but aren't currently linked
-4. Generating a report of internal linking opportunities
-
-## Requirements
-
-- Python 3.6+
-- Google Colab environment (recommended)
-- Required packages:
-  - requests
-  - beautifulsoup4
-  - pandas
-  - spacy
-  - numpy
-
-## Installation
-
-The easiest way to use this tool is through Google Colab. Upload the Python script and follow the instructions in the sample notebook.
-
-To install the required packages manually:
-
-```bash
-pip install requests beautifulsoup4 pandas spacy
-python -m spacy download en_core_web_sm
-```
-
-## Usage
-
-### Option 1: Run in Google Colab with the provided notebook
-
-1. Upload `internal_linking_analyzer.py` and `sample_usage.ipynb` to Google Colab
-2. Run the notebook cells following the instructions
-
-### Option 2: Run the script directly
-
-```python
-from internal_linking_analyzer import run_internal_linking_analysis
-
-# Execute the main function
-run_internal_linking_analysis()
-```
-
-## Input Files
-
-### XML Sitemap
-
-The tool accepts standard XML sitemaps following the sitemap protocol. Example:
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-  <url>
-    <loc>https://www.example.com/</loc>
-    <lastmod>2023-01-01</lastmod>
-    <changefreq>daily</changefreq>
-    <priority>1.0</priority>
-  </url>
-  <!-- more URLs -->
-</urlset>
-```
-
-### Google Search Console Performance Report
-
-Export your GSC performance report as a CSV file with the following columns:
-- Landing Page (URL)
-- Query (keyword)
-- Additional metrics (clicks, impressions, etc.) are optional
-
-## Output
-
-The tool generates a CSV file with internal linking opportunities:
-
-| source_url | keyword | text_snippet | target_url |
-|------------|---------|--------------|------------|
-| https://example.com/page1 | internal linking | This article discusses internal linking strategies | https://example.com/page2 |
+This Streamlit application helps you find contextually relevant internal linking opportunities within your content. It processes Google Search Console data and your website content to suggest where and how to add internal links based on semantic similarity.
 
 ## Features
 
-- Extracts main content from web pages while excluding headers, footers, and sidebars
-- Normalizes URLs to handle variations (HTTP/HTTPS, with/without trailing slashes)
-- Checks if keywords are already linked to avoid duplicate suggestions
-- Prioritizes longer keywords for better anchor text optimization
-- Handles errors gracefully (404 pages, timeouts, etc.)
-- Provides detailed progress information during processing
+- **Semantic Keyword Extraction**: Identifies the most relevant keywords from your content
+- **Contextual Matching**: Finds linking opportunities that make sense in context
+- **Smart Anchor Text Suggestions**: Recommends semantically appropriate anchor texts
+- **Content Improvement Suggestions**: Provides recommendations for content updates when direct linking isn't possible
+- **Similarity Scoring**: Ranks suggestions by semantic relevance
 
-## Limitations
+## Input Requirements
 
-- The tool respects robots.txt and implements reasonable delays between requests to avoid overwhelming servers
-- Processing large websites may take significant time
-- The content extraction algorithm uses common patterns and may not work perfectly for all website layouts
-- No semantic analysis for keyword variations (only exact matches)
+The application requires two input files:
 
-## License
+1. **Google Search Console Performance Report (CSV/XLSX)** with columns:
+   - URL: Landing page URLs
+   - Query: Keywords/queries
+   - Clicks: Number of clicks
+   - Impressions: Number of impressions
 
-MIT License
+2. **Content File (CSV/XLSX)** with columns:
+   - URL: Landing page URLs
+   - Content: The content of each page
 
-## Contributing
+## Output
 
-Contributions are welcome! Feel free to submit pull requests or open issues.
+The application generates a report with the following columns:
+
+- **Source URL**: The landing page where the link will be placed
+- **Anchor Text**: Suggested anchor text for the link
+- **Similarity Score**: Semantic similarity score between the anchor text and destination page
+- **Destination URL**: The landing page the link should point to
+- **Content Context**: Content snippet showing where the link should be placed
+- **Existing Anchor?**: Indicates if there's already a link
+- **New Content Suggestion**: Suggests content modifications if no direct linking opportunity exists
+
+## How to Use
+
+1. Upload your Google Search Console performance report
+2. Upload your content file
+3. Configure parameters:
+   - Number of top queries to consider per page
+   - Similarity threshold for matching
+   - Maximum suggestions per page
+4. Click "Find Internal Linking Opportunities"
+5. Review and download the results
+
+## Installation
+
+```bash
+# Clone the repository
+git clone <repository-url>
+cd internal-link-finder
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run the application
+streamlit run app.py
+```
+
+## Deployment
+
+The application can be deployed on Streamlit Cloud or any other platform that supports Streamlit applications.
+
+## Requirements
+
+See `requirements.txt` for a complete list of dependencies.
