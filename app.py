@@ -1,405 +1,415 @@
-"""
-Internal Linking Opportunity Analyzer
-
-This script analyzes a website's content and Google Search Console data to identify
-internal linking opportunities based on keyword relevance.
-
-Author: Cascade AI
-Date: 2025-03-05
-"""
-
-import requests
-from bs4 import BeautifulSoup
+import streamlit as st
 import pandas as pd
 import numpy as np
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+import nltk
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
 import re
-import xml.etree.ElementTree as ET
-from urllib.parse import urlparse, urljoin
 import spacy
-import time
-import csv
-from io import StringIO
-from google.colab import files
-import warnings
-warnings.filterwarnings('ignore')
+from sentence_transformers import SentenceTransformer
+import torch
+from transformers import pipeline
 
-# Load NLP model for semantic analysis
-try:
-    nlp = spacy.load("en_core_web_sm")
-    nlp_available = True
-    print("NLP model loaded successfully")
-except:
-    nlp_available = False
-    print("NLP model not available. Will use basic text matching only.")
-    print("To enable semantic analysis, run: !python -m spacy download en_core_web_sm")
+# Download required NLTK data
+@st.cache_resource
+def download_nltk_data():
+    nltk.download('punkt')
+    nltk.download('stopwords')
+    nltk.download('wordnet')
 
-
-class InternalLinkingAnalyzer:
-    """Main class for analyzing internal linking opportunities."""
-
-    def __init__(self):
-        self.sitemap_urls = []
-        self.gsc_data = None
-        self.html_contents = {}
-        self.main_contents = {}
-        self.internal_linking_opportunities = []
-        self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
-        
-    def extract_urls_from_sitemap(self, sitemap_content):
-        """Extract URLs from an XML sitemap.
-        
-        Args:
-            sitemap_content (str): XML sitemap content
-            
-        Returns:
-            list: List of URLs from the sitemap
-        """
-        urls = []
-        try:
-            # Parse the XML content
-            root = ET.fromstring(sitemap_content)
-            
-            # Extract URLs (handle different sitemap formats)
-            # Standard sitemap format
-            namespaces = {'ns': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
-            for url in root.findall('.//ns:url/ns:loc', namespaces):
-                urls.append(url.text.strip())
-                
-            # If no URLs found with namespace, try without namespace
-            if not urls:
-                for url in root.findall('.//loc'):
-                    urls.append(url.text.strip())
-                    
-            print(f"Extracted {len(urls)} URLs from sitemap")
-        except ET.ParseError as e:
-            print(f"Error parsing sitemap XML: {e}")
-        
-        return urls
+# Load models
+@st.cache_resource
+def load_models():
+    # Load spaCy for NER and sentence segmentation
+    try:
+        nlp = spacy.load("en_core_web_md")
+    except:
+        # If model not available, download it
+        import subprocess
+        subprocess.run(["python", "-m", "spacy", "download", "en_core_web_md"])
+        nlp = spacy.load("en_core_web_md")
     
-    def parse_gsc_data(self, gsc_content):
-        """Parse Google Search Console data.
-        
-        Args:
-            gsc_content (str): CSV content from GSC export
-            
-        Returns:
-            DataFrame: Processed GSC data
-        """
-        try:
-            df = pd.read_csv(StringIO(gsc_content))
-            
-            # Handle variations in GSC column names
-            landing_page_cols = [col for col in df.columns if 'landing' in col.lower() or 'page' in col.lower() or 'url' in col.lower()]
-            query_cols = [col for col in df.columns if 'query' in col.lower() or 'keyword' in col.lower()]
-            
-            if not landing_page_cols or not query_cols:
-                print("Warning: Could not identify landing page or query columns in GSC data")
-                print("Available columns:", df.columns.tolist())
-                return None
-            
-            landing_page_col = landing_page_cols[0]
-            query_col = query_cols[0]
-            
-            # Select relevant columns and rename for consistency
-            gsc_df = df[[landing_page_col, query_col]].copy()
-            gsc_df.columns = ['landing_page', 'query']
-            
-            # Clean URLs (remove protocol variations, trailing slashes)
-            gsc_df['landing_page'] = gsc_df['landing_page'].apply(self._normalize_url)
-            
-            # Remove empty queries
-            gsc_df = gsc_df[gsc_df['query'].notna() & (gsc_df['query'] != '')].reset_index(drop=True)
-            
-            print(f"Processed {len(gsc_df)} GSC data entries")
-            return gsc_df
-        
-        except Exception as e:
-            print(f"Error parsing GSC data: {e}")
-            return None
+    # Load sentence-transformers model for semantic similarity
+    model = SentenceTransformer('all-MiniLM-L6-v2')
     
-    def _normalize_url(self, url):
-        """Normalize URL to handle variations.
-        
-        Args:
-            url (str): URL to normalize
-            
-        Returns:
-            str: Normalized URL
-        """
-        if pd.isna(url):
-            return ""
-        
-        parsed = urlparse(url)
-        path = parsed.path
-        if path.endswith('/'):
-            path = path[:-1]
-        
-        # Reconstruct without protocol to handle http/https variations
-        normalized = parsed.netloc + path
-        return normalized.lower()
+    # Load keyword extraction model
+    keyword_extractor = pipeline("ner", model="dbmdz/bert-large-cased-finetuned-conll03-english")
     
-    def scrape_urls(self, max_urls=None, delay=1):
-        """Scrape HTML content from URLs in the sitemap.
+    return nlp, model, keyword_extractor
+
+def preprocess_text(text):
+    """Clean and preprocess text."""
+    # Convert to lowercase
+    text = text.lower()
+    # Remove special characters and numbers
+    text = re.sub(r'[^\w\s]', ' ', text)
+    text = re.sub(r'\d+', ' ', text)
+    # Remove extra whitespaces
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+def extract_keywords(text, nlp, keyword_extractor, top_n=20):
+    """Extract keywords from text using NER and keyword extraction."""
+    # Process text with spaCy
+    doc = nlp(text)
+    
+    # Extract named entities
+    entities = [ent.text.lower() for ent in doc.ents if len(ent.text) > 2]
+    
+    # Extract noun phrases
+    noun_phrases = [chunk.text.lower() for chunk in doc.noun_chunks if len(chunk.text) > 2]
+    
+    # Use BERT-based keyword extraction
+    bert_keywords = []
+    try:
+        # Process text in chunks to avoid token limit issues
+        chunks = [text[i:i+512] for i in range(0, len(text), 512)]
+        for chunk in chunks:
+            results = keyword_extractor(chunk)
+            for result in results:
+                if len(result['word']) > 2:
+                    bert_keywords.append(result['word'].lower())
+    except Exception as e:
+        st.warning(f"BERT keyword extraction error: {e}")
+    
+    # Combine all keywords
+    all_keywords = entities + noun_phrases + bert_keywords
+    
+    # Remove duplicates and sort by frequency
+    keyword_freq = {}
+    for kw in all_keywords:
+        kw = kw.strip()
+        if kw and len(kw) > 2:
+            keyword_freq[kw] = keyword_freq.get(kw, 0) + 1
+    
+    # Sort by frequency and return top N
+    sorted_keywords = sorted(keyword_freq.items(), key=lambda x: x[1], reverse=True)
+    return [k for k, v in sorted_keywords[:top_n]]
+
+def generate_semantic_variations(keywords, model, nlp):
+    """Generate semantically related variations of keywords."""
+    variations = []
+    
+    for keyword in keywords:
+        # Get embeddings for the keyword
+        doc = nlp(keyword)
         
-        Args:
-            max_urls (int, optional): Maximum number of URLs to scrape. Defaults to None (all).
-            delay (int, optional): Delay between requests in seconds. Defaults to 1.
-        """
-        if not self.sitemap_urls:
-            print("No URLs to scrape. Please load sitemap first.")
-            return
+        # Find similar words using spaCy
+        for token in doc:
+            most_similar = token.similarity
+            if hasattr(token, 'vector_norm') and token.vector_norm:
+                for similar_word in token.vocab:
+                    if similar_word.is_lower and similar_word.prob >= -15 and similar_word.has_vector:
+                        similarity = token.similarity(similar_word)
+                        if similarity > 0.7 and similar_word.text != token.text:
+                            variations.append(similar_word.text)
         
-        urls_to_scrape = self.sitemap_urls
-        if max_urls:
-            urls_to_scrape = urls_to_scrape[:max_urls]
+        # Add the original keyword
+        variations.append(keyword)
+    
+    # Remove duplicates
+    variations = list(set(variations))
+    return variations
+
+def extract_content_snippets(content, keyword, window_size=150):
+    """Extract content snippets around keyword occurrences."""
+    snippets = []
+    content_lower = content.lower()
+    keyword_lower = keyword.lower()
+    
+    # Find all occurrences of the keyword
+    start_positions = [m.start() for m in re.finditer(r'\b' + re.escape(keyword_lower) + r'\b', content_lower)]
+    
+    for start in start_positions:
+        # Determine snippet boundaries
+        snippet_start = max(0, start - window_size)
+        snippet_end = min(len(content), start + len(keyword) + window_size)
         
-        print(f"Scraping {len(urls_to_scrape)} URLs...")
+        # Extract snippet
+        snippet = content[snippet_start:snippet_end]
         
-        for i, url in enumerate(urls_to_scrape):
-            try:
-                print(f"Scraping {i+1}/{len(urls_to_scrape)}: {url}")
-                
-                response = requests.get(url, headers=self.headers, timeout=10)
-                if response.status_code == 200:
-                    self.html_contents[url] = response.text
-                    # Extract main content immediately to free up memory
-                    self.extract_main_content(url)
+        # Add ellipsis if needed
+        if snippet_start > 0:
+            snippet = "..." + snippet
+        if snippet_end < len(content):
+            snippet = snippet + "..."
+        
+        # Highlight the keyword in the snippet (preserving original case)
+        original_case_keyword = content[start:start+len(keyword)]
+        snippet = snippet.replace(original_case_keyword, f"**{original_case_keyword}**")
+        
+        snippets.append(snippet)
+    
+    return snippets
+
+def check_existing_anchor(content, keyword, destination_url):
+    """Check if there's already an anchor with the given keyword linking to the destination."""
+    # Simple regex pattern to find links containing the keyword
+    pattern = rf'<a\s+[^>]*href=["\']([^"\']*)["\'][^>]*>{keyword}</a>'
+    matches = re.finditer(pattern, content, re.IGNORECASE)
+    
+    for match in matches:
+        href = match.group(1)
+        if destination_url in href:
+            return True
+    
+    return False
+
+def suggest_new_content(original_content, keyword, window_size=200):
+    """Suggest new content or modifications to include the keyword."""
+    # Find potential insertion points in the content
+    sentences = nltk.sent_tokenize(original_content)
+    best_sentence_idx = -1
+    best_similarity = -1
+    
+    # Create a simple representation of the keyword
+    keyword_tokens = set(nltk.word_tokenize(keyword.lower()))
+    
+    # Find the most relevant sentence for insertion
+    for i, sentence in enumerate(sentences):
+        sentence_tokens = set(nltk.word_tokenize(sentence.lower()))
+        # Calculate Jaccard similarity
+        if len(keyword_tokens) > 0 and len(sentence_tokens) > 0:
+            similarity = len(keyword_tokens.intersection(sentence_tokens)) / len(keyword_tokens.union(sentence_tokens))
+            if similarity > best_similarity:
+                best_similarity = similarity
+                best_sentence_idx = i
+    
+    if best_sentence_idx >= 0:
+        # Generate a suggestion by modifying the best sentence
+        original_sentence = sentences[best_sentence_idx]
+        
+        # Simple suggestion: Add the keyword if it's not already there
+        if keyword.lower() not in original_sentence.lower():
+            # Find a good insertion point (after a comma or period)
+            insertion_points = [m.start() for m in re.finditer(r'[,.]', original_sentence)]
+            if insertion_points:
+                insertion_point = insertion_points[-1] + 1
+                new_sentence = original_sentence[:insertion_point] + f" {keyword} is also relevant here." + original_sentence[insertion_point:]
+            else:
+                # If no good insertion point, append to the end
+                new_sentence = original_sentence + f" {keyword} is also relevant in this context."
+            
+            # Show original and suggested modification
+            return f"Original: {original_sentence}\nSuggested: {new_sentence}"
+        else:
+            # If keyword already exists but not as an anchor
+            return f"The keyword '{keyword}' already exists in the content but is not linked. Consider converting it to an anchor text."
+    
+    # If no good match found
+    return f"Consider adding a new paragraph or sentence mentioning '{keyword}' in a relevant context."
+
+def calculate_similarity_score(text1, text2, model):
+    """Calculate semantic similarity between two texts using sentence transformers."""
+    # Encode texts to get embeddings
+    embedding1 = model.encode(text1, convert_to_tensor=True)
+    embedding2 = model.encode(text2, convert_to_tensor=True)
+    
+    # Calculate cosine similarity
+    cos_sim = torch.nn.functional.cosine_similarity(embedding1.unsqueeze(0), embedding2.unsqueeze(0))
+    
+    # Convert to percentage
+    similarity_score = float(cos_sim) * 100
+    
+    return round(similarity_score, 2)
+
+def main():
+    st.set_page_config(page_title="Context-Aware Internal Link Finder", page_icon="🔗", layout="wide")
+    
+    st.title("Context-Aware Automatic Keyword Interlinker")
+    st.markdown("""
+    This app helps you find contextually relevant internal linking opportunities within your content.
+    Upload your Google Search Console data and content file to get started.
+    """)
+    
+    # Download required data
+    download_nltk_data()
+    
+    # Load models
+    with st.spinner("Loading NLP models... (this may take a moment)"):
+        nlp, semantic_model, keyword_extractor = load_models()
+    
+    # File uploaders
+    st.header("Upload Your Data")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("Google Search Console Data")
+        gsc_file = st.file_uploader("Upload GSC Performance Report (CSV or XLSX)", type=["csv", "xlsx"])
+        
+    with col2:
+        st.subheader("Content Data")
+        content_file = st.file_uploader("Upload Content File (CSV or XLSX)", type=["csv", "xlsx"])
+    
+    # Parameters
+    st.header("Configuration")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        top_queries = st.number_input("Number of top queries per page", min_value=5, max_value=50, value=10)
+    
+    with col2:
+        similarity_threshold = st.slider("Similarity Threshold (%)", min_value=50, max_value=95, value=70)
+    
+    with col3:
+        max_suggestions = st.number_input("Maximum suggestions per page", min_value=1, max_value=50, value=5)
+    
+    # Process data
+    if st.button("Find Internal Linking Opportunities"):
+        if gsc_file is None or content_file is None:
+            st.error("Please upload both required files.")
+        else:
+            with st.spinner("Processing data and finding opportunities..."):
+                # Load GSC data
+                if gsc_file.name.endswith('.csv'):
+                    gsc_data = pd.read_csv(gsc_file)
                 else:
-                    print(f"Failed to fetch {url}. Status code: {response.status_code}")
+                    gsc_data = pd.read_excel(gsc_file)
                 
-                # Add delay to avoid overwhelming the server
-                if i < len(urls_to_scrape) - 1:
-                    time.sleep(delay)
-                    
-            except Exception as e:
-                print(f"Error scraping {url}: {e}")
-        
-        print(f"Scraped {len(self.html_contents)} URLs successfully")
-    
-    def extract_main_content(self, url):
-        """Extract main content from HTML, excluding headers, footers, and sidebars.
-        
-        Args:
-            url (str): URL of the page
-        """
-        if url not in self.html_contents:
-            print(f"HTML content for {url} not found")
-            return
-        
-        html = self.html_contents[url]
-        soup = BeautifulSoup(html, 'html.parser')
-        
-        # Remove common non-content elements
-        for element in soup.select('header, footer, nav, .sidebar, .widget, .menu, .comments, .advertisement, .breadcrumbs, aside'):
-            element.extract()
-        
-        # Try to find main content using common content containers
-        content = None
-        content_selectors = [
-            'main', 'article', '.content', '.post-content', '.entry-content', 
-            '#content', '#main', '.main-content', '.post-body', '.article-content'
-        ]
-        
-        for selector in content_selectors:
-            content_element = soup.select_one(selector)
-            if content_element:
-                content = content_element
-                break
-        
-        # If no content container is found, use the body as fallback
-        if not content:
-            content = soup.body
-            
-        # Store main content
-        if content:
-            # Extract all paragraphs
-            paragraphs = content.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li'])
-            self.main_contents[url] = [p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True)]
-        else:
-            self.main_contents[url] = []
-        
-        # Free up memory
-        del self.html_contents[url]
-    
-    def find_internal_linking_opportunities(self):
-        """Identify internal linking opportunities by matching GSC keywords with content."""
-        if not self.gsc_data or not self.main_contents:
-            print("Missing GSC data or webpage content. Please load both first.")
-            return
-        
-        opportunities = []
-        
-        # Get all landing pages from GSC data
-        all_landing_pages = self.gsc_data['landing_page'].unique()
-        
-        # For each URL in main contents
-        for source_url, paragraphs in self.main_contents.items():
-            source_url_normalized = self._normalize_url(source_url)
-            
-            # Skip self-referencing
-            relevant_landing_pages = [page for page in all_landing_pages if self._normalize_url(page) != source_url_normalized]
-            
-            # Get relevant queries for this source URL
-            source_queries = set(self.gsc_data[self.gsc_data['landing_page'] == source_url_normalized]['query'].str.lower())
-            
-            # For each potential target URL (landing page)
-            for target_landing_page in relevant_landing_pages:
-                # Get the keywords associated with this landing page
-                target_queries = set(self.gsc_data[self.gsc_data['landing_page'] == target_landing_page]['query'].str.lower())
+                # Load content data
+                if content_file.name.endswith('.csv'):
+                    content_data = pd.read_csv(content_file)
+                else:
+                    content_data = pd.read_excel(content_file)
                 
-                # For each paragraph in the source content
-                for paragraph in paragraphs:
-                    paragraph_lower = paragraph.lower()
+                # Check if required columns exist
+                required_gsc_cols = ['URL', 'Query', 'Clicks', 'Impressions']
+                required_content_cols = ['URL', 'Content']
+                
+                missing_gsc_cols = [col for col in required_gsc_cols if col not in gsc_data.columns]
+                missing_content_cols = [col for col in required_content_cols if col not in content_data.columns]
+                
+                if missing_gsc_cols or missing_content_cols:
+                    if missing_gsc_cols:
+                        st.error(f"GSC file is missing required columns: {', '.join(missing_gsc_cols)}")
+                    if missing_content_cols:
+                        st.error(f"Content file is missing required columns: {', '.join(missing_content_cols)}")
+                else:
+                    # Process GSC data to get top queries per page
+                    gsc_data = gsc_data.sort_values(by=['URL', 'Clicks'], ascending=[True, False])
+                    top_queries_per_page = {}
                     
-                    # For each query associated with the target landing page
-                    for query in target_queries:
-                        if not query or len(query) < 3:  # Skip very short queries
+                    for url in gsc_data['URL'].unique():
+                        page_queries = gsc_data[gsc_data['URL'] == url].head(top_queries)
+                        if not page_queries.empty:
+                            top_queries_per_page[url] = page_queries['Query'].tolist()
+                    
+                    # Generate results
+                    results = []
+                    
+                    # For each page in the content data
+                    for _, content_row in content_data.iterrows():
+                        source_url = content_row['URL']
+                        source_content = str(content_row['Content'])
+                        
+                        # Skip if no content
+                        if pd.isna(source_content) or not source_content.strip():
                             continue
+                        
+                        # Get top queries for this page
+                        if source_url in top_queries_per_page:
+                            queries = top_queries_per_page[source_url]
                             
-                        # Check if the query appears in the paragraph but is not in the source URL's queries
-                        # (to avoid linking to competing terms)
-                        if query in paragraph_lower and query not in source_queries:
-                            # Get the original case from the paragraph
-                            query_pattern = re.compile(re.escape(query), re.IGNORECASE)
-                            match = query_pattern.search(paragraph)
-                            if match:
-                                original_case_query = match.group(0)
+                            # Extract keywords and generate variations
+                            keywords = extract_keywords(source_content, nlp, keyword_extractor, top_n=top_queries)
+                            all_keywords = list(set(queries + keywords))
+                            keyword_variations = generate_semantic_variations(all_keywords, semantic_model, nlp)
+                            
+                            # For each destination page
+                            for _, dest_row in content_data.iterrows():
+                                dest_url = dest_row['URL']
+                                dest_content = str(dest_row['Content'])
                                 
-                                # Check if the query is already linked in the HTML
-                                is_already_linked = self._check_if_already_linked(source_url, original_case_query)
+                                # Skip self-links or empty content
+                                if dest_url == source_url or pd.isna(dest_content) or not dest_content.strip():
+                                    continue
                                 
-                                if not is_already_linked:
-                                    # Get target URL from the sitemap URLs that matches the landing page
-                                    target_urls = [url for url in self.sitemap_urls 
-                                                   if self._normalize_url(url) == target_landing_page]
-                                    
-                                    if target_urls:
-                                        target_url = target_urls[0]  # Use the first match
+                                # Calculate base similarity between pages
+                                base_similarity = calculate_similarity_score(
+                                    preprocess_text(source_content)[:1000], 
+                                    preprocess_text(dest_content)[:1000],
+                                    semantic_model
+                                )
+                                
+                                # Only consider pages with some similarity
+                                if base_similarity >= 50:
+                                    # For each potential anchor text
+                                    for keyword in keyword_variations:
+                                        # Skip very short keywords
+                                        if len(keyword) < 3:
+                                            continue
                                         
-                                        # Add to opportunities
-                                        opportunities.append({
-                                            'source_url': source_url,
-                                            'keyword': original_case_query,
-                                            'text_snippet': paragraph,
-                                            'target_url': target_url
-                                        })
-        
-        # Deduplicate opportunities (same source, keyword, target)
-        if opportunities:
-            df = pd.DataFrame(opportunities)
-            df = df.drop_duplicates(subset=['source_url', 'keyword', 'target_url'])
-            
-            # Prioritize opportunities
-            df['keyword_length'] = df['keyword'].str.len()
-            df = df.sort_values(['source_url', 'keyword_length'], ascending=[True, False])
-            
-            self.internal_linking_opportunities = df.to_dict('records')
-            print(f"Found {len(self.internal_linking_opportunities)} internal linking opportunities")
-        else:
-            print("No internal linking opportunities found")
-    
-    def _check_if_already_linked(self, url, keyword):
-        """Check if a keyword is already used as a link in the HTML.
-        
-        Args:
-            url (str): URL to check
-            keyword (str): Keyword to check for links
-            
-        Returns:
-            bool: True if already linked, False otherwise
-        """
-        # Re-fetch the HTML since we don't store it anymore
-        try:
-            response = requests.get(url, headers=self.headers, timeout=10)
-            if response.status_code != 200:
-                return False
-                
-            html = response.text
-            soup = BeautifulSoup(html, 'html.parser')
-            
-            # Find all anchor tags
-            links = soup.find_all('a')
-            
-            # Check if the keyword is used as link text
-            for link in links:
-                link_text = link.get_text(strip=True)
-                if keyword.lower() in link_text.lower():
-                    return True
+                                        # Calculate keyword to destination similarity
+                                        keyword_dest_similarity = calculate_similarity_score(
+                                            keyword, 
+                                            preprocess_text(dest_content)[:1000],
+                                            semantic_model
+                                        )
+                                        
+                                        # Only consider if similarity is above threshold
+                                        if keyword_dest_similarity >= similarity_threshold:
+                                            # Extract context snippets
+                                            snippets = extract_content_snippets(source_content, keyword)
+                                            
+                                            # Check if anchor already exists
+                                            has_existing_anchor = check_existing_anchor(source_content, keyword, dest_url)
+                                            
+                                            # Generate suggestion if no anchor exists
+                                            content_suggestion = ""
+                                            if not has_existing_anchor and not snippets:
+                                                content_suggestion = suggest_new_content(source_content, keyword)
+                                            
+                                            # If we have snippets or a suggestion
+                                            if snippets or content_suggestion:
+                                                # Get the best context snippet
+                                                context = snippets[0] if snippets else "No direct match found in content."
+                                                
+                                                results.append({
+                                                    'Source URL': source_url,
+                                                    'Anchor Text': keyword,
+                                                    'Similarity Score': keyword_dest_similarity,
+                                                    'Destination URL': dest_url,
+                                                    'Content Context': context,
+                                                    'Existing Anchor?': 'Yes' if has_existing_anchor else 'No',
+                                                    'New Content Suggestion': content_suggestion if not has_existing_anchor and not snippets else ""
+                                                })
                     
-            return False
-            
-        except Exception as e:
-            print(f"Error checking links in {url}: {e}")
-            return False
-    
-    def export_opportunities(self, output_filename='internal_linking_opportunities.csv'):
-        """Export internal linking opportunities to CSV.
-        
-        Args:
-            output_filename (str, optional): Output filename. Defaults to 'internal_linking_opportunities.csv'.
-        """
-        if not self.internal_linking_opportunities:
-            print("No opportunities to export")
-            return
-            
-        df = pd.DataFrame(self.internal_linking_opportunities)
-        df.to_csv(output_filename, index=False)
-        print(f"Exported {len(df)} opportunities to {output_filename}")
-        
-        # For Google Colab, provide a download link
-        try:
-            files.download(output_filename)
-            print("Download initiated")
-        except:
-            print(f"File saved to {output_filename}. Please download manually.")
+                    # Convert to DataFrame and sort
+                    if results:
+                        df_results = pd.DataFrame(results)
+                        df_results = df_results.sort_values(by=['Similarity Score'], ascending=False)
+                        
+                        # Limit results per page
+                        page_counts = df_results['Source URL'].value_counts()
+                        filtered_results = []
+                        
+                        for _, row in df_results.iterrows():
+                            source_url = row['Source URL']
+                            if page_counts[source_url] <= max_suggestions:
+                                filtered_results.append(row)
+                            else:
+                                page_counts[source_url] -= 1
+                        
+                        final_results = pd.DataFrame(filtered_results)
+                        
+                        # Display results
+                        st.header("Internal Linking Opportunities")
+                        st.dataframe(final_results, use_container_width=True)
+                        
+                        # Download button
+                        csv = final_results.to_csv(index=False)
+                        st.download_button(
+                            label="Download Results as CSV",
+                            data=csv,
+                            file_name="internal_linking_opportunities.csv",
+                            mime="text/csv"
+                        )
+                    else:
+                        st.warning("No linking opportunities found with the current settings. Try adjusting the similarity threshold or increasing the number of top queries.")
 
-# Main execution function for Google Colab
-def run_internal_linking_analysis():
-    """Run the internal linking analysis process in Google Colab."""
-    
-    analyzer = InternalLinkingAnalyzer()
-    
-    print("=== Internal Linking Opportunity Analyzer ===")
-    print("This tool analyzes your website content and GSC data to find internal linking opportunities.")
-    print("\n1. Upload your XML sitemap file")
-    
-    uploaded = files.upload()
-    sitemap_file = list(uploaded.keys())[0]
-    sitemap_content = uploaded[sitemap_file].decode('utf-8')
-    
-    # Extract URLs from sitemap
-    analyzer.sitemap_urls = analyzer.extract_urls_from_sitemap(sitemap_content)
-    
-    print("\n2. Upload your Google Search Console CSV export")
-    uploaded = files.upload()
-    gsc_file = list(uploaded.keys())[0]
-    gsc_content = uploaded[gsc_file].decode('utf-8')
-    
-    # Parse GSC data
-    analyzer.gsc_data = analyzer.parse_gsc_data(gsc_content)
-    
-    # Ask for scraping limit
-    max_urls = int(input("\nEnter maximum number of URLs to scrape (leave blank for all): ") or "0")
-    if max_urls <= 0:
-        max_urls = None
-    
-    # Scrape the URLs
-    analyzer.scrape_urls(max_urls=max_urls)
-    
-    # Find opportunities
-    analyzer.find_internal_linking_opportunities()
-    
-    # Export results
-    if analyzer.internal_linking_opportunities:
-        output_filename = input("\nEnter output filename (default: internal_linking_opportunities.csv): ")
-        if not output_filename:
-            output_filename = "internal_linking_opportunities.csv"
-        analyzer.export_opportunities(output_filename)
-    
-    print("\nAnalysis complete!")
-
-# For direct execution in Colab
 if __name__ == "__main__":
-    run_internal_linking_analysis()
+    main()
