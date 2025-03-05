@@ -7,12 +7,14 @@ import nltk
 from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
 import re
-import spacy
 import sys
 import os
-from sentence_transformers import SentenceTransformer
+import importlib
+import spacy
 import torch
+from sentence_transformers import SentenceTransformer
 from transformers import pipeline
+import spacy_streamlit
 
 # Download required NLTK data
 @st.cache_resource
@@ -24,79 +26,49 @@ def download_nltk_data():
 # Load models
 @st.cache_resource
 def load_models():
-    # Load spaCy for NER and sentence segmentation
-    try:
-        nlp = spacy.load("en_core_web_md")
-    except OSError:
-        st.info("Downloading spaCy model. This may take a moment...")
-        # Use subprocess to run the spaCy download command
-        import subprocess
-        result = subprocess.run([sys.executable, "-m", "spacy", "download", "en_core_web_md"], 
-                              capture_output=True, text=True)
-        if result.returncode != 0:
-            st.error(f"Failed to download spaCy model: {result.stderr}")
-            st.info("Trying alternative download method...")
+    # Show a spinner while loading models
+    with st.spinner("Loading NLP models... (this may take a moment)"):
+        # Check for CUDA availability
+        cuda_available = torch.cuda.is_available()
+        if cuda_available:
+            st.success("✅ CUDA is available! Using GPU for faster processing")
+        
+        # Load spaCy model
+        try:
+            nlp = spacy.load("en_core_web_sm")
+            st.success("✅ Successfully loaded spaCy model")
+        except OSError as e:
+            st.warning(f"Could not load spaCy model: {e}")
+            st.info("Downloading spaCy model. This may take a moment...")
             
-            # Try using a smaller model as fallback
+            # Use spacy_streamlit to download model
+            spacy_streamlit.download_model("en_core_web_sm")
             try:
-                result = subprocess.run([sys.executable, "-m", "spacy", "download", "en_core_web_sm"], 
-                                     capture_output=True, text=True)
-                if result.returncode != 0:
-                    st.error(f"Failed to download alternative model: {result.stderr}")
-                    st.error("Please install the spaCy model manually: python -m spacy download en_core_web_md")
-                    # Use a very simple fallback
-                    nlp = spacy.blank("en")
-                else:
-                    nlp = spacy.load("en_core_web_sm")
-                    st.warning("Using a smaller language model. Results may be less accurate.")
-            except:
-                nlp = spacy.blank("en")
-                st.warning("Using a basic language model. Results may be less accurate.")
-        else:
-            nlp = spacy.load("en_core_web_md")
-    
-    # Load sentence-transformers model for semantic similarity
-    try:
-        model = SentenceTransformer('all-MiniLM-L6-v2')
-    except Exception as e:
-        st.error(f"Error loading sentence transformer model: {e}")
-        # Create a simple fallback
-        from sklearn.feature_extraction.text import TfidfVectorizer
-        class SimpleSentenceTransformer:
-            def __init__(self):
-                self.vectorizer = TfidfVectorizer()
-                self.fitted = False
-                
-            def encode(self, texts, convert_to_tensor=False):
-                if isinstance(texts, str):
-                    texts = [texts]
-                if not self.fitted:
-                    self.vectorizer.fit(texts)
-                    self.fitted = True
-                vectors = self.vectorizer.transform(texts).toarray()
-                if convert_to_tensor:
-                    import numpy as np
-                    return torch.tensor(vectors)
-                return vectors
+                nlp = spacy.load("en_core_web_sm")
+                st.success("✅ Successfully downloaded and loaded spaCy model")
+            except Exception as e:
+                st.error(f"Error loading spaCy model after download: {e}")
+                return None, None, None
         
-        model = SimpleSentenceTransformer()
-        st.warning("Using a simplified text transformer. Results may be less accurate.")
-    
-    # Load keyword extraction model
-    try:
-        keyword_extractor = pipeline("ner", model="dbmdz/bert-large-cased-finetuned-conll03-english")
-    except Exception as e:
-        st.error(f"Error loading NER model: {e}")
-        # Create a simple fallback
-        class SimpleKeywordExtractor:
-            def __call__(self, text):
-                words = text.split()
-                return [{"word": word, "entity": "MISC"} for word in words if len(word) > 3]
+        # Load sentence-transformers model
+        try:
+            device = 'cuda' if cuda_available else 'cpu'
+            model = SentenceTransformer('all-MiniLM-L6-v2', device=device)
+            st.success(f"✅ Successfully loaded sentence transformer model on {device}")
+        except Exception as e:
+            st.error(f"Error loading sentence transformer model: {e}")
+            return nlp, None, None
         
-        keyword_extractor = SimpleKeywordExtractor()
-        st.warning("Using a simplified keyword extractor. Results may be less accurate.")
-    
-    return nlp, model, keyword_extractor
+        # Load NER model
+        try:
+            device = 0 if cuda_available else -1  # 0=cuda, -1=cpu
+            keyword_extractor = pipeline("ner", model="dbmdz/bert-large-cased-finetuned-conll03-english", device=device)
+            st.success(f"✅ Successfully loaded NER model on {'GPU' if device==0 else 'CPU'}")
+        except Exception as e:
+            st.error(f"Error loading NER model: {e}")
+            return nlp, model, None
+        
+        return nlp, model, keyword_extractor
 
 def preprocess_text(text):
     """Clean and preprocess text."""
@@ -111,17 +83,27 @@ def preprocess_text(text):
 
 def extract_keywords(text, nlp, keyword_extractor, top_n=20):
     """Extract keywords from text using NER and keyword extraction."""
-    # Process text with spaCy
-    doc = nlp(text)
+    # Initialize keywords list
+    all_keywords = []
     
-    # Extract named entities
-    entities = [ent.text.lower() for ent in doc.ents if len(ent.text) > 2]
+    # Extract named entities with spaCy if available
+    if hasattr(nlp, 'ents'):
+        try:
+            # Process text with spaCy
+            doc = nlp(text)
+            
+            # Extract named entities
+            entities = [ent.text.lower() for ent in doc.ents if len(ent.text) > 2]
+            all_keywords.extend(entities)
+            
+            # Extract noun phrases if available
+            if hasattr(doc, 'noun_chunks'):
+                noun_phrases = [chunk.text.lower() for chunk in doc.noun_chunks if len(chunk.text) > 2]
+                all_keywords.extend(noun_phrases)
+        except Exception as e:
+            st.warning(f"Error in spaCy keyword extraction: {e}")
     
-    # Extract noun phrases
-    noun_phrases = [chunk.text.lower() for chunk in doc.noun_chunks if len(chunk.text) > 2]
-    
-    # Use BERT-based keyword extraction
-    bert_keywords = []
+    # Use BERT-based keyword extraction if available
     try:
         # Process text in chunks to avoid token limit issues
         chunks = [text[i:i+512] for i in range(0, len(text), 512)]
@@ -129,12 +111,30 @@ def extract_keywords(text, nlp, keyword_extractor, top_n=20):
             results = keyword_extractor(chunk)
             for result in results:
                 if len(result['word']) > 2:
-                    bert_keywords.append(result['word'].lower())
+                    all_keywords.append(result['word'].lower())
     except Exception as e:
         st.warning(f"BERT keyword extraction error: {e}")
     
-    # Combine all keywords
-    all_keywords = entities + noun_phrases + bert_keywords
+    # Fall back to simple TF-IDF extraction if needed
+    if not all_keywords:
+        try:
+            # Use TF-IDF to extract important words
+            vectorizer = TfidfVectorizer(max_features=top_n*2, stop_words='english')
+            tfidf_matrix = vectorizer.fit_transform([text])
+            feature_names = vectorizer.get_feature_names_out()
+            
+            # Sort by TF-IDF score
+            scores = zip(feature_names, tfidf_matrix.toarray()[0])
+            sorted_scores = sorted(scores, key=lambda x: x[1], reverse=True)
+            
+            # Add top keywords
+            all_keywords.extend([word for word, score in sorted_scores[:top_n*2]])
+        except Exception as e:
+            st.warning(f"TF-IDF keyword extraction error: {e}")
+            
+            # Last resort: just take words longer than 3 characters
+            words = re.findall(r'\b\w{4,}\b', text.lower())
+            all_keywords.extend(words[:top_n*3])
     
     # Remove duplicates and sort by frequency
     keyword_freq = {}
@@ -151,22 +151,42 @@ def generate_semantic_variations(keywords, model, nlp):
     """Generate semantically related variations of keywords."""
     variations = []
     
-    for keyword in keywords:
-        # Get embeddings for the keyword
-        doc = nlp(keyword)
-        
-        # Find similar words using spaCy
-        for token in doc:
-            most_similar = token.similarity
-            if hasattr(token, 'vector_norm') and token.vector_norm:
-                for similar_word in token.vocab:
-                    if similar_word.is_lower and similar_word.prob >= -15 and similar_word.has_vector:
-                        similarity = token.similarity(similar_word)
-                        if similarity > 0.7 and similar_word.text != token.text:
-                            variations.append(similar_word.text)
-        
-        # Add the original keyword
-        variations.append(keyword)
+    # Start with the original keywords
+    variations.extend(keywords)
+    
+    # Add simple variations if spaCy not fully functional
+    if not hasattr(next(iter([]), 'similarity') if hasattr(nlp, 'vocab') and nlp.vocab else [], 'similarity'):
+        # Simple word variations (singular/plural, etc.)
+        for keyword in keywords:
+            # Add basic variations
+            if keyword.endswith('s'):
+                variations.append(keyword[:-1])  # Remove 's'
+            else:
+                variations.append(keyword + 's')  # Add 's'
+                
+            # Add variations with common prefixes/suffixes
+            variations.append(keyword + 'ing')
+            variations.append(keyword + 'ed')
+            
+            # Add hyphenated and non-hyphenated versions
+            if '-' in keyword:
+                variations.append(keyword.replace('-', ' '))
+            elif ' ' in keyword:
+                variations.append(keyword.replace(' ', '-'))
+    else:
+        # Use spaCy for more advanced variations if available
+        for keyword in keywords:
+            # Get embeddings for the keyword
+            doc = nlp(keyword)
+            
+            # Find similar words using spaCy
+            for token in doc:
+                if hasattr(token, 'vector_norm') and token.vector_norm:
+                    for similar_word in token.vocab:
+                        if similar_word.is_lower and similar_word.prob >= -15 and similar_word.has_vector:
+                            similarity = token.similarity(similar_word)
+                            if similarity > 0.7 and similar_word.text != token.text:
+                                variations.append(similar_word.text)
     
     # Remove duplicates
     variations = list(set(variations))
@@ -262,17 +282,31 @@ def suggest_new_content(original_content, keyword, window_size=200):
 
 def calculate_similarity_score(text1, text2, model):
     """Calculate semantic similarity between two texts using sentence transformers."""
-    # Encode texts to get embeddings
-    embedding1 = model.encode(text1, convert_to_tensor=True)
-    embedding2 = model.encode(text2, convert_to_tensor=True)
-    
-    # Calculate cosine similarity
-    cos_sim = torch.nn.functional.cosine_similarity(embedding1.unsqueeze(0), embedding2.unsqueeze(0))
-    
-    # Convert to percentage
-    similarity_score = float(cos_sim) * 100
-    
-    return round(similarity_score, 2)
+    try:
+        # Encode texts to get embeddings
+        embedding1 = model.encode(text1, convert_to_tensor=True)
+        embedding2 = model.encode(text2, convert_to_tensor=True)
+        
+        # Calculate cosine similarity
+        cos_sim = torch.nn.functional.cosine_similarity(embedding1.unsqueeze(0), embedding2.unsqueeze(0))
+        similarity_score = float(cos_sim) * 100
+        
+        return round(similarity_score, 2)
+    except Exception as e:
+        st.warning(f"Error calculating similarity: {e}, using fallback method")
+        # Fallback to sklearn's cosine similarity
+        from sklearn.metrics.pairwise import cosine_similarity
+        
+        # Get embeddings as numpy arrays
+        emb1 = model.encode(text1, convert_to_tensor=False)
+        emb2 = model.encode(text2, convert_to_tensor=False)
+        
+        # Reshape for cosine_similarity
+        e1 = emb1.reshape(1, -1)
+        e2 = emb2.reshape(1, -1)
+        
+        similarity_score = float(cosine_similarity(e1, e2)[0][0]) * 100
+        return round(similarity_score, 2)
 
 def main():
     st.set_page_config(page_title="Context-Aware Internal Link Finder", page_icon="🔗", layout="wide")
@@ -287,8 +321,7 @@ def main():
     download_nltk_data()
     
     # Load models
-    with st.spinner("Loading NLP models... (this may take a moment)"):
-        nlp, semantic_model, keyword_extractor = load_models()
+    nlp, semantic_model, keyword_extractor = load_models()
     
     # File uploaders
     st.header("Upload Your Data")
